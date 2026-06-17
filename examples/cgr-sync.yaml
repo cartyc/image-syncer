@@ -1,0 +1,32 @@
+# cgr-sync configuration: mirror Chainguard (cgr.dev) images into a private
+# OCI registry. Run with:  cgr-sync -config examples/cgr-sync.yaml [-dry-run]
+
+defaults:
+  # Source registry + namespace (your Chainguard org repo).
+  source: cgr.dev/chriscarty.com
+  # Destination registry + namespace (any OCI registry: GAR, Artifactory,
+  # Cloudsmith, ...). The repository name is appended unless a repo sets its
+  # own full `destination`.
+  destination: us-docker.pkg.dev/my-project/cgr-mirror
+  # Default tag selection when a repository doesn't specify its own.
+  tags:
+    list: ["latest"]
+
+repositories:
+  # Mirror specific tags.
+  - name: python
+    tags:
+      list: ["latest", "3.12", "3.13"]
+
+  # Mirror every tag that matches a regex (and skip ones that match exclude).
+  - name: node
+    tags:
+      all: true
+      include: '^[0-9]+$'      # major-version tags like "20", "22"
+      exclude: '-dev$'
+
+  # Send one repo to a different destination than the default.
+  - name: nginx
+    destination: cloudsmith.io/my-org/cgr-mirror/nginx
+    tags:
+      list: ["latest"]

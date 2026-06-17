@@ -1,0 +1,10 @@
+# Binaries
+/cgr-sync
+/dist/
+*.exe
+
+# Local config that may carry registry paths/creds
+cgr-sync.local.yaml
+
+# Editor / OS
+.DS_Store
