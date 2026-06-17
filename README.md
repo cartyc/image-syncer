@@ -17,6 +17,49 @@ a status code.
   (`~/.docker/config.json`), ambient cloud credentials, and cred helpers; no
   per-vendor code required.
 
+## How it works
+
+At a high level, cgr-sync reads a config, pulls from the Chainguard source, and
+pushes only what's missing to your private registry:
+
+```mermaid
+flowchart LR
+  cfg[/"cgr-sync.yaml<br/>repos + tag selectors"/]
+  auth[/"docker config +<br/>cloud credentials"/]
+  src[("cgr.dev/&lt;org&gt;<br/>source")]
+  tool["cgr-sync<br/>go-containerregistry"]
+  dst[("private OCI registry<br/>GAR / Artifactory / Cloudsmith")]
+
+  cfg -.-> tool
+  auth -.-> tool
+  src -->|"list tags · pull"| tool
+  tool -->|"push missing / changed"| dst
+```
+
+For each repository it lists the source tags, selects the ones you asked for,
+and diffs each by digest — copying only what the destination is missing or has
+stale, then mirroring that image's cosign artifacts:
+
+```mermaid
+flowchart TD
+  start([run]) --> list["list source tags"]
+  list --> select["select tags<br/>(explicit list, or all + include/exclude regex)"]
+  select --> tag{"for each<br/>selected tag"}
+  tag --> sd["get source digest"]
+  sd --> dd["get destination digest"]
+  dd --> cmp{"dest exists and<br/>digest matches?"}
+  cmp -->|"yes"| skip["skip — in sync"]
+  cmp -->|"no / 404"| dry{"dry-run?"}
+  dry -->|"yes"| plan["log: would copy"]
+  dry -->|"no"| copy["crane.Copy<br/>(manifest + all platforms)"]
+  copy --> sigs{"mirror<br/>signatures?"}
+  sigs -->|"yes"| cosign["copy sha256-&lt;digest&gt;<br/>.sig / .att / .sbom"]
+  skip --> next([next tag])
+  plan --> next
+  sigs -->|"no"| next
+  cosign --> next
+```
+
 ## Install / build
 
 ```sh
