@@ -11,8 +11,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/chriscarty/cgr-sync/internal/config"
-	imgsync "github.com/chriscarty/cgr-sync/internal/sync"
+	"github.com/cartyc/image-syncer/internal/config"
+	imgsync "github.com/cartyc/image-syncer/internal/sync"
 )
 
 // version is overridden at build time: -ldflags "-X main.version=<v>".

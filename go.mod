@@ -1,4 +1,4 @@
-module github.com/chriscarty/cgr-sync
+module github.com/cartyc/image-syncer
 
 go 1.26.3
 

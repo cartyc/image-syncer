@@ -16,7 +16,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/google"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
-	"github.com/chriscarty/cgr-sync/internal/config"
+	"github.com/cartyc/image-syncer/internal/config"
 )
 
 // Options control a sync run.
