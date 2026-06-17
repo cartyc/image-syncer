@@ -68,10 +68,18 @@ go build -o cgr-sync ./cmd/cgr-sync
 
 ## Usage
 
+Two modes — a one-shot `sync` (run on a schedule / in CI) and a `serve`
+listener that mirrors in near-real-time on Chainguard push events. They're
+complementary: `serve` reacts immediately to new images; the scheduled `sync`
+reconciles anything a missed event would have left behind.
+
 ```sh
-cgr-sync -config cgr-sync.yaml            # sync per config
-cgr-sync -config cgr-sync.yaml -dry-run   # plan only, copy nothing
+cgr-sync sync  -config cgr-sync.yaml             # one-shot mirror (default subcommand)
+cgr-sync sync  -config cgr-sync.yaml -dry-run    # plan only, copy nothing
+cgr-sync serve -config cgr-sync.yaml -audience https://mirror.example.com/events
 ```
+
+`sync` flags:
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -79,9 +87,58 @@ cgr-sync -config cgr-sync.yaml -dry-run   # plan only, copy nothing
 | `-dry-run` | `false` | Plan and print the work; copy nothing. |
 | `-continue-on-error` | `false` | Keep going after a failure instead of exiting on the first. |
 | `-no-signatures` | `false` | Mirror images only; skip cosign artifacts. |
-| `-version` | | Print version and exit. |
 
 Exit code is `0` on success, `1` if any image failed, `2` on a config error.
+(`cgr-sync` with no subcommand defaults to `sync`; `cgr-sync -version` prints the version.)
+
+## Event-driven mode (Chainguard CloudEvents)
+
+`cgr-sync serve` runs an HTTP webhook that listens for Chainguard
+[registry events](https://edu.chainguard.dev/chainguard/administration/cloudevents/events-example/).
+On a `push` event (`dev.chainguard.registry.push.v1`) it validates the event's
+OIDC token, then mirrors that single image — but only if the repository is in
+your config and the tag passes its selector. Other event types and
+unconfigured repos are acknowledged and ignored.
+
+```mermaid
+flowchart LR
+  reg[("cgr.dev push")] -->|"CloudEvent"| wh["cgr-sync serve<br/>/events webhook"]
+  wh -->|"validate OIDC token"| wh
+  wh -->|"matches config?"| sync["mirror that image<br/>+ signatures"]
+  sync --> dst[("private OCI registry")]
+```
+
+Run the listener (it needs a public URL, e.g. behind an Ingress / Cloud Run):
+
+```sh
+cgr-sync serve \
+  -config cgr-sync.yaml \
+  -addr :8080 \
+  -audience https://mirror.example.com/events \   # your public webhook URL (token audience)
+  -identity webhook:<your-UIDP>                    # optional: pin the event subject
+```
+
+Then subscribe it to your organization's events:
+
+```sh
+chainctl events subscriptions create https://mirror.example.com/events
+```
+
+`serve` flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-config` | `cgr-sync.yaml` | Path to the config file. |
+| `-addr` | `:8080` | Listen address. |
+| `-path` | `/events` | Webhook path. |
+| `-audience` | | Expected token audience = your public webhook URL. Required unless `-insecure-skip-verify`. |
+| `-identity` | | Expected event subject, e.g. `webhook:<UIDP>` (optional extra check). |
+| `-no-signatures` | `false` | Mirror images only; skip cosign artifacts. |
+| `-insecure-skip-verify` | `false` | **Local testing only** — skip token validation. Never expose publicly. |
+
+Tokens are verified against the Chainguard issuer `https://issuer.enforce.dev`
+(signature, expiry, issuer, audience, and — if set — subject). `GET /healthz`
+returns `ok` for liveness probes.
 
 ## Configuration
 
@@ -142,6 +199,6 @@ no browser login is triggered.
 
 ## Status / roadmap
 
-MVP — generic OCI mirroring with signature/attestation copy. Planned next:
-referrers-API artifact mirroring, semver tag selection, concurrency, and
-per-vendor auth conveniences.
+MVP — generic OCI mirroring with signature/attestation copy, plus event-driven
+mirroring via Chainguard CloudEvents. Planned next: referrers-API artifact
+mirroring, semver tag selection, concurrency, and per-vendor auth conveniences.

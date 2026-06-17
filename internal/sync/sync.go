@@ -44,21 +44,25 @@ type syncer struct {
 	crane []crane.Option
 }
 
-// Run mirrors every repository in cfg. It returns a non-nil error when any
-// operation failed (the Result still reports what succeeded).
-func Run(ctx context.Context, cfg *config.Config, opts Options) (Result, error) {
+// newSyncer wires the auth keychain and crane options shared by Run/SyncImage.
+// DefaultKeychain reads ~/.docker/config.json (where `docker login` /
+// `chainctl auth` store cgr.dev creds); google.Keychain adds ambient GAR/GCR
+// auth. Together they cover the generic "any OCI registry" case.
+func newSyncer(ctx context.Context, opts Options) *syncer {
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
 	}
-	// DefaultKeychain reads ~/.docker/config.json (where `docker login` /
-	// `chainctl auth` store cgr.dev creds); google.Keychain adds ambient
-	// GAR/GCR auth. Together they cover the generic "any OCI registry" case.
 	kc := authn.NewMultiKeychain(google.Keychain, authn.DefaultKeychain)
-	s := &syncer{
+	return &syncer{
 		opts:  opts,
 		crane: []crane.Option{crane.WithContext(ctx), crane.WithAuthFromKeychain(kc)},
 	}
+}
 
+// Run mirrors every repository in cfg. It returns a non-nil error when any
+// operation failed (the Result still reports what succeeded).
+func Run(ctx context.Context, cfg *config.Config, opts Options) (Result, error) {
+	s := newSyncer(ctx, opts)
 	var res Result
 	for _, repo := range cfg.Repositories {
 		if err := ctx.Err(); err != nil {
@@ -66,16 +70,47 @@ func Run(ctx context.Context, cfg *config.Config, opts Options) (Result, error) 
 		}
 		if err := s.syncRepo(repo, &res); err != nil {
 			res.Failed++
-			if !opts.ContinueOnError {
+			if !s.opts.ContinueOnError {
 				return res, err
 			}
-			opts.Logf("ERROR repo %s: %v", repo.Name, err)
+			s.opts.Logf("ERROR repo %s: %v", repo.Name, err)
 		}
 	}
 	if res.Failed > 0 {
 		return res, fmt.Errorf("%d operation(s) failed", res.Failed)
 	}
 	return res, nil
+}
+
+// SyncImage mirrors a single image on demand — used by the event listener when
+// a push event arrives. sourceRepo is the fully-qualified source path (e.g.
+// "cgr.dev/example.com/python"). It acts only when sourceRepo matches a
+// configured repository and tag passes that repo's selector; matched reports
+// whether a configured repo was found.
+func SyncImage(ctx context.Context, cfg *config.Config, opts Options, sourceRepo, tag string) (res Result, matched bool, err error) {
+	var repo *config.Repository
+	for i := range cfg.Repositories {
+		if cfg.Repositories[i].SourceRepo() == sourceRepo {
+			repo = &cfg.Repositories[i]
+			break
+		}
+	}
+	if repo == nil {
+		return res, false, nil
+	}
+	selected, _, serr := repo.Tags.Select([]string{tag})
+	if serr != nil {
+		return res, true, serr
+	}
+	if len(selected) == 0 {
+		return res, true, nil // configured repo, but this tag isn't selected
+	}
+	s := newSyncer(ctx, opts)
+	if err := s.syncTag(repo.SourceRepo(), repo.DestRepo(), tag, &res); err != nil {
+		res.Failed++
+		return res, true, err
+	}
+	return res, true, nil
 }
 
 func (s *syncer) syncRepo(repo config.Repository, res *Result) error {
