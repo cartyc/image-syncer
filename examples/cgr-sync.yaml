@@ -3,7 +3,7 @@
 
 defaults:
   # Source registry + namespace (your Chainguard org repo).
-  source: cgr.dev/chriscarty.com
+  source: cgr.dev/example.com
   # Destination registry + namespace (any OCI registry: GAR, Artifactory,
   # Cloudsmith, ...). The repository name is appended unless a repo sets its
   # own full `destination`.

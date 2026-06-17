@@ -90,7 +90,7 @@ from `defaults`:
 
 ```yaml
 defaults:
-  source: cgr.dev/chriscarty.com
+  source: cgr.dev/example.com
   destination: us-docker.pkg.dev/my-project/cgr-mirror
   tags:
     list: ["latest"]

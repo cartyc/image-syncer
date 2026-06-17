@@ -20,7 +20,7 @@ type Config struct {
 
 // Defaults are inherited by each repository.
 type Defaults struct {
-	// Source registry+namespace, e.g. "cgr.dev/chriscarty.com".
+	// Source registry+namespace, e.g. "cgr.dev/example.com".
 	Source string `yaml:"source"`
 	// Destination registry+namespace, e.g. "us-docker.pkg.dev/proj/mirror".
 	Destination string `yaml:"destination"`
@@ -31,7 +31,7 @@ type Defaults struct {
 // Repository is one image stream to mirror from source to destination.
 type Repository struct {
 	// Name is the repository path under the source/destination namespaces,
-	// e.g. "python" -> "cgr.dev/chriscarty.com/python".
+	// e.g. "python" -> "cgr.dev/example.com/python".
 	Name string `yaml:"name"`
 	// Source overrides Defaults.Source for this repo (full registry+namespace).
 	Source string `yaml:"source"`
@@ -116,7 +116,7 @@ func (c *Config) resolve() error {
 }
 
 // SourceRepo returns the fully-qualified source repository path, e.g.
-// "cgr.dev/chriscarty.com/python".
+// "cgr.dev/example.com/python".
 func (r Repository) SourceRepo() string {
 	return r.Source + "/" + r.Name
 }
