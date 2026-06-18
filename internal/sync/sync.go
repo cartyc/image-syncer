@@ -17,7 +17,13 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
 	"github.com/cartyc/image-syncer/internal/config"
+	"github.com/cartyc/image-syncer/internal/verify"
 )
+
+// Verifier checks an image's signature against a policy before it is mirrored.
+type Verifier interface {
+	Verify(ctx context.Context, ref string, p verify.Policy) error
+}
 
 // Options control a sync run.
 type Options struct {
@@ -27,6 +33,9 @@ type Options struct {
 	MirrorSignatures bool
 	// ContinueOnError keeps going after a per-image failure (default: stop).
 	ContinueOnError bool
+	// Verify, when set, gates copying on cosign verification for repositories
+	// whose policy is enabled. Required if any repo enables verification.
+	Verify Verifier
 	// Logf receives human-readable progress lines (newline added by caller).
 	Logf func(format string, args ...any)
 }
@@ -40,6 +49,7 @@ type Result struct {
 }
 
 type syncer struct {
+	ctx   context.Context
 	opts  Options
 	crane []crane.Option
 }
@@ -54,6 +64,7 @@ func newSyncer(ctx context.Context, opts Options) *syncer {
 	}
 	kc := authn.NewMultiKeychain(google.Keychain, authn.DefaultKeychain)
 	return &syncer{
+		ctx:   ctx,
 		opts:  opts,
 		crane: []crane.Option{crane.WithContext(ctx), crane.WithAuthFromKeychain(kc)},
 	}
@@ -106,7 +117,7 @@ func SyncImage(ctx context.Context, cfg *config.Config, opts Options, sourceRepo
 		return res, true, nil // configured repo, but this tag isn't selected
 	}
 	s := newSyncer(ctx, opts)
-	if err := s.syncTag(repo.SourceRepo(), repo.DestRepo(), tag, &res); err != nil {
+	if err := s.syncTag(repo.SourceRepo(), repo.DestRepo(), tag, repo.Verify, &res); err != nil {
 		res.Failed++
 		return res, true, err
 	}
@@ -133,7 +144,7 @@ func (s *syncer) syncRepo(repo config.Repository, res *Result) error {
 		return nil
 	}
 	for _, tag := range selected {
-		if err := s.syncTag(src, dst, tag, res); err != nil {
+		if err := s.syncTag(src, dst, tag, repo.Verify, res); err != nil {
 			res.Failed++
 			if !s.opts.ContinueOnError {
 				return err
@@ -144,7 +155,7 @@ func (s *syncer) syncRepo(repo config.Repository, res *Result) error {
 	return nil
 }
 
-func (s *syncer) syncTag(src, dst, tag string, res *Result) error {
+func (s *syncer) syncTag(src, dst, tag string, pol config.Verify, res *Result) error {
 	srcRef, dstRef := src+":"+tag, dst+":"+tag
 
 	srcDigest, err := crane.Digest(srcRef, s.crane...)
@@ -163,16 +174,44 @@ func (s *syncer) syncTag(src, dst, tag string, res *Result) error {
 	}
 
 	if s.opts.DryRun {
-		s.opts.Logf("  + would copy %s:%s (%s)", dst, tag, short(srcDigest))
+		verifyNote := ""
+		if pol.Enabled {
+			verifyNote = " [would verify]"
+		}
+		s.opts.Logf("  + would copy %s:%s (%s)%s", dst, tag, short(srcDigest), verifyNote)
 		res.Copied++
 		return nil
 	}
+
+	// Gate the copy on cosign verification of the exact digest we're about to
+	// mirror (verifying by digest avoids a tag-vs-content race).
+	if pol.Enabled {
+		if s.opts.Verify == nil {
+			return fmt.Errorf("verification required for %s but no verifier configured", srcRef)
+		}
+		vref := src + "@" + srcDigest
+		s.opts.Logf("  verifying %s:%s (%s)", src, tag, short(srcDigest))
+		if err := s.opts.Verify.Verify(s.ctx, vref, toPolicy(pol)); err != nil {
+			return fmt.Errorf("verify %s: %w", vref, err)
+		}
+	}
+
 	s.opts.Logf("  + copy %s:%s (%s)", dst, tag, short(srcDigest))
 	if err := crane.Copy(srcRef, dstRef, s.crane...); err != nil {
 		return fmt.Errorf("copy %s -> %s: %w", srcRef, dstRef, err)
 	}
 	res.Copied++
 	return s.mirrorSignatures(src, dst, srcDigest, res)
+}
+
+// toPolicy maps the config verification block onto the verify package's policy.
+func toPolicy(v config.Verify) verify.Policy {
+	return verify.Policy{
+		Identity:       v.CertificateIdentity,
+		IdentityRegexp: v.CertificateIdentityRegexp,
+		Issuer:         v.CertificateOIDCIssuer,
+		IssuerRegexp:   v.CertificateOIDCIssuerRegexp,
+	}
 }
 
 // mirrorSignatures copies cosign artifacts that follow the tag scheme

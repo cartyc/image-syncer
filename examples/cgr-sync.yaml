@@ -6,11 +6,18 @@ defaults:
   source: cgr.dev/example.com
   # Destination registry + namespace (any OCI registry: GAR, Artifactory,
   # Cloudsmith, ...). The repository name is appended unless a repo sets its
-  # own full `destination`.
-  destination: us-docker.pkg.dev/my-project/cgr-mirror
+  # own full `destination`. ${VAR} is expanded from the environment, so secrets
+  # / per-environment values need not be hard-coded:
+  destination: ${DEST_REGISTRY}
   # Default tag selection when a repository doesn't specify its own.
   tags:
     list: ["latest"]
+  # Optional: verify each image's cosign signature before mirroring (requires
+  # the `cosign` binary on PATH). A failed verification blocks the copy.
+  verify:
+    enabled: true
+    certificate_identity: https://github.com/chainguard-images/images-private/.github/workflows/release.yaml@refs/heads/main
+    certificate_oidc_issuer: https://token.actions.githubusercontent.com
 
 repositories:
   # Mirror specific tags.

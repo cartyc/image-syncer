@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -26,6 +27,30 @@ type Defaults struct {
 	Destination string `yaml:"destination"`
 	// Tag selection applied when a repository doesn't specify its own.
 	Tags TagSelector `yaml:"tags"`
+	// Verify is the cosign verification policy applied before mirroring.
+	Verify Verify `yaml:"verify"`
+}
+
+// Verify is a cosign signature-verification policy. When Enabled, an image's
+// signature is verified (keyless / Fulcio) before it is mirrored; verification
+// failure blocks the copy. It maps onto `cosign verify` flags.
+type Verify struct {
+	// Enabled turns on verification for the repository.
+	Enabled bool `yaml:"enabled"`
+	// CertificateIdentity is the exact expected signing identity (SAN).
+	CertificateIdentity string `yaml:"certificate_identity"`
+	// CertificateIdentityRegexp matches the signing identity by regex.
+	CertificateIdentityRegexp string `yaml:"certificate_identity_regexp"`
+	// CertificateOIDCIssuer is the exact expected OIDC issuer.
+	CertificateOIDCIssuer string `yaml:"certificate_oidc_issuer"`
+	// CertificateOIDCIssuerRegexp matches the OIDC issuer by regex.
+	CertificateOIDCIssuerRegexp string `yaml:"certificate_oidc_issuer_regexp"`
+}
+
+// IsZero reports whether the policy specifies nothing (so it can inherit).
+func (v Verify) IsZero() bool {
+	return !v.Enabled && v.CertificateIdentity == "" && v.CertificateIdentityRegexp == "" &&
+		v.CertificateOIDCIssuer == "" && v.CertificateOIDCIssuerRegexp == ""
 }
 
 // Repository is one image stream to mirror from source to destination.
@@ -40,6 +65,8 @@ type Repository struct {
 	Destination string `yaml:"destination"`
 	// Tags overrides Defaults.Tags for this repo.
 	Tags TagSelector `yaml:"tags"`
+	// Verify overrides Defaults.Verify for this repo (specify the whole block).
+	Verify Verify `yaml:"verify"`
 }
 
 // TagSelector chooses which tags of a repository to mirror. The fields are
@@ -68,8 +95,9 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	expanded := expandEnv(string(raw))
 	var c Config
-	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
+	dec := yaml.NewDecoder(strings.NewReader(expanded))
 	dec.KnownFields(true) // reject unknown keys to catch typos early
 	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
@@ -100,6 +128,9 @@ func (c *Config) resolve() error {
 		if r.Tags.IsZero() {
 			r.Tags = c.Defaults.Tags
 		}
+		if r.Verify.IsZero() {
+			r.Verify = c.Defaults.Verify
+		}
 		r.Source = strings.TrimRight(r.Source, "/")
 		r.Destination = strings.TrimRight(r.Destination, "/")
 		if r.Source == "" {
@@ -111,8 +142,28 @@ func (c *Config) resolve() error {
 		if r.Tags.IsZero() {
 			return fmt.Errorf("repository %q: no tag selector (set defaults.tags or repository.tags)", r.Name)
 		}
+		if r.Verify.Enabled {
+			if r.Verify.CertificateIdentity == "" && r.Verify.CertificateIdentityRegexp == "" {
+				return fmt.Errorf("repository %q: verify.enabled needs certificate_identity or certificate_identity_regexp", r.Name)
+			}
+			if r.Verify.CertificateOIDCIssuer == "" && r.Verify.CertificateOIDCIssuerRegexp == "" {
+				return fmt.Errorf("repository %q: verify.enabled needs certificate_oidc_issuer or certificate_oidc_issuer_regexp", r.Name)
+			}
+		}
 	}
 	return nil
+}
+
+// envVar matches ${NAME} (braced only) so bare '$' in regexes (e.g. "-dev$")
+// is left untouched.
+var envVar = regexp.MustCompile(`\$\{(\w+)\}`)
+
+// expandEnv replaces ${NAME} with the environment value (empty if unset),
+// letting configs reference secrets/per-environment values without hard-coding.
+func expandEnv(s string) string {
+	return envVar.ReplaceAllStringFunc(s, func(m string) string {
+		return os.Getenv(envVar.FindStringSubmatch(m)[1])
+	})
 }
 
 // SourceRepo returns the fully-qualified source repository path, e.g.

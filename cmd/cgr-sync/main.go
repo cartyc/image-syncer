@@ -21,6 +21,7 @@ import (
 	"github.com/cartyc/image-syncer/internal/config"
 	"github.com/cartyc/image-syncer/internal/events"
 	imgsync "github.com/cartyc/image-syncer/internal/sync"
+	"github.com/cartyc/image-syncer/internal/verify"
 )
 
 // version is overridden at build time: -ldflags "-X main.version=<v>".
@@ -47,6 +48,22 @@ func fatal(code int, f string, a ...any) {
 	os.Exit(code)
 }
 
+// verifierFor returns a cosign verifier if any repository enables verification,
+// else nil. Exits with a clear error if verification is required but cosign is
+// unavailable.
+func verifierFor(cfg *config.Config) imgsync.Verifier {
+	for _, r := range cfg.Repositories {
+		if r.Verify.Enabled {
+			v, err := verify.NewCosign()
+			if err != nil {
+				fatal(2, "%v", err)
+			}
+			return v
+		}
+	}
+	return nil
+}
+
 // syncCmd is the one-shot mirror (CI / cron).
 func syncCmd(args []string) {
 	fs := flag.NewFlagSet("sync", flag.ExitOnError)
@@ -68,6 +85,7 @@ func syncCmd(args []string) {
 		DryRun:           *dryRun,
 		MirrorSignatures: !*noSigs,
 		ContinueOnError:  *cont,
+		Verify:           verifierFor(cfg),
 		Logf:             logf,
 	})
 	fmt.Printf("\nsummary: copied=%d skipped=%d signatures=%d failed=%d\n",
@@ -112,7 +130,7 @@ func serveCmd(args []string) {
 		validator = v
 	}
 
-	opts := imgsync.Options{MirrorSignatures: !*noSigs, Logf: logf}
+	opts := imgsync.Options{MirrorSignatures: !*noSigs, Verify: verifierFor(cfg), Logf: logf}
 	h := &events.Handler{
 		Validate: validator,
 		Logf:     logf,

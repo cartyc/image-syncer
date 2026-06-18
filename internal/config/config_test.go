@@ -87,6 +87,66 @@ repositories:
 	}
 }
 
+func TestLoadVerifyInheritAndEnvExpand(t *testing.T) {
+	t.Setenv("DEST_REG", "reg.example.com/mirror")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	// destination via ${DEST_REG}; a regex with a bare '$' must survive expansion.
+	yaml := `
+defaults:
+  source: cgr.dev/example.com
+  destination: ${DEST_REG}
+  tags:
+    all: true
+    include: '^[0-9]+$'
+  verify:
+    enabled: true
+    certificate_identity: https://example.com/release.yaml@refs/heads/main
+    certificate_oidc_issuer: https://token.actions.githubusercontent.com
+repositories:
+  - name: python
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := cfg.Repositories[0]
+	if r.DestRepo() != "reg.example.com/mirror/python" {
+		t.Errorf("env-expanded dest = %q", r.DestRepo())
+	}
+	if r.Tags.Include != `^[0-9]+$` {
+		t.Errorf("regex with bare $ got mangled: %q", r.Tags.Include)
+	}
+	if !r.Verify.Enabled || r.Verify.CertificateOIDCIssuer == "" {
+		t.Errorf("verify policy not inherited: %+v", r.Verify)
+	}
+}
+
+func TestLoadRejectsVerifyWithoutIdentity(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	yaml := `
+defaults:
+  source: cgr.dev/example.com
+  destination: reg.example.com/mirror
+  tags: { list: ["latest"] }
+repositories:
+  - name: python
+    verify:
+      enabled: true
+      certificate_oidc_issuer: https://token.actions.githubusercontent.com
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error: verify.enabled without an identity")
+	}
+}
+
 func TestLoadRejectsUnknownKeys(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")

@@ -13,6 +13,8 @@ a status code.
 - **Supply-chain preserving** — also mirrors cosign signatures, attestations,
   and SBOMs (the `sha256-<digest>.sig`/`.att`/`.sbom` tag scheme), so the mirror
   stays verifiable.
+- **Verify before mirror** — optionally gate copying on a cosign policy
+  (certificate identity + OIDC issuer), so only verified images are mirrored.
 - **Any OCI registry** — auth comes from the standard Docker keychain
   (`~/.docker/config.json`), ambient cloud credentials, and cred helpers; no
   per-vendor code required.
@@ -167,7 +169,30 @@ repositories:
 ```
 
 A repository's `destination` may be a registry+namespace prefix (the repo name
-is appended) or a full repository path (used as-is).
+is appended) or a full repository path (used as-is). `${VAR}` anywhere in the
+config is expanded from the environment (a bare `$`, e.g. in a regex like
+`-dev$`, is left alone), so registries/secrets can come from CI variables.
+
+## Verification (cosign)
+
+Set a `verify` policy to gate mirroring on signature verification — an image is
+copied only if its cosign signature satisfies the policy, so you never mirror an
+unverified or tampered image. It maps onto `cosign verify` and requires the
+`cosign` binary on `PATH`.
+
+```yaml
+defaults:
+  verify:
+    enabled: true
+    certificate_identity: https://github.com/chainguard-images/images-private/.github/workflows/release.yaml@refs/heads/main
+    certificate_oidc_issuer: https://token.actions.githubusercontent.com
+    # ...or the regex forms: certificate_identity_regexp / certificate_oidc_issuer_regexp
+```
+
+Verification runs against the exact **digest** about to be mirrored (not the tag,
+avoiding a tag-vs-content race). Like `tags`, a `verify` block is inherited
+whole from `defaults` unless a repository specifies its own. `enabled: true`
+requires an identity (exact or regex) and an issuer (exact or regex).
 
 ## Authentication
 
@@ -199,6 +224,7 @@ no browser login is triggered.
 
 ## Status / roadmap
 
-MVP — generic OCI mirroring with signature/attestation copy, plus event-driven
-mirroring via Chainguard CloudEvents. Planned next: referrers-API artifact
-mirroring, semver tag selection, concurrency, and per-vendor auth conveniences.
+MVP — generic OCI mirroring with signature/attestation copy, cosign
+verify-before-mirror, and event-driven mirroring via Chainguard CloudEvents.
+Planned next: referrers-API artifact mirroring, semver tag selection,
+concurrency, and per-vendor auth conveniences.
