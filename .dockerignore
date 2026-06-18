@@ -1,0 +1,6 @@
+.git
+.gitignore
+*.md
+examples
+/cgr-sync
+/dist

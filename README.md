@@ -68,6 +68,29 @@ flowchart TD
 go build -o cgr-sync ./cmd/cgr-sync
 ```
 
+### Container
+
+A `Containerfile` builds cgr-sync on free, public Chainguard images — the Go
+toolchain (`cgr.dev/chainguard/go`) for the build, a distroless nonroot runtime
+(`cgr.dev/chainguard/static`), and `cgr.dev/chainguard/cosign` for the
+verify-before-mirror feature:
+
+```sh
+docker build -f Containerfile -t cgr-sync --build-arg VERSION="$(git describe --tags --always)" .
+
+# one-shot sync
+docker run --rm -v "$PWD/cgr-sync.yaml:/cgr-sync.yaml:ro" cgr-sync sync -config /cgr-sync.yaml
+
+# webhook listener
+docker run --rm -p 8080:8080 -v "$PWD/cgr-sync.yaml:/cgr-sync.yaml:ro" \
+  cgr-sync serve -config /cgr-sync.yaml -audience https://mirror.example.com/events
+```
+
+Registry credentials come from the standard keychain at runtime — mount a Docker
+config (`-v ~/.docker/config.json:/tmp/.docker/config.json:ro` with `DOCKER_CONFIG=/tmp/.docker`)
+or use the platform's ambient cloud credentials. If you don't use `verify`, drop
+the `cosign` stage + COPY from the `Containerfile` for a smaller image.
+
 ## Usage
 
 Two modes — a one-shot `sync` (run on a schedule / in CI) and a `serve`
