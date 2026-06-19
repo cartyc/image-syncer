@@ -112,6 +112,11 @@ cgr-sync serve -config cgr-sync.yaml -audience https://mirror.example.com/events
 | `-dry-run` | `false` | Plan and print the work; copy nothing. |
 | `-continue-on-error` | `false` | Keep going after a failure instead of exiting on the first. |
 | `-no-signatures` | `false` | Mirror images only; skip cosign artifacts. |
+| `-timeout` | `2m` | Per-operation registry timeout (0 = none). |
+
+Registry calls retry on transient failures (network errors, 429, 5xx) with
+backoff, and re-runs are write-free when everything is already in sync (images
+**and** signatures are diffed by digest).
 
 Exit code is `0` on success, `1` if any image failed, `2` on a config error.
 (`cgr-sync` with no subcommand defaults to `sync`; `cgr-sync -version` prints the version.)
@@ -159,6 +164,7 @@ chainctl events subscriptions create https://mirror.example.com/events
 | `-audience` | | Expected token audience = your public webhook URL. Required unless `-insecure-skip-verify`. |
 | `-identity` | | Expected event subject, e.g. `webhook:<UIDP>` (optional extra check). |
 | `-no-signatures` | `false` | Mirror images only; skip cosign artifacts. |
+| `-timeout` | `2m` | Per-operation registry timeout (0 = none). |
 | `-insecure-skip-verify` | `false` | **Local testing only** — skip token validation. Never expose publicly. |
 
 Tokens are verified against the Chainguard issuer `https://issuer.enforce.dev`
@@ -229,6 +235,11 @@ normal tooling before running:
   account) are picked up automatically, or `gcloud auth configure-docker`.
 - **Artifactory / Cloudsmith / other:** `docker login <registry>` (token/API
   key), which cgr-sync reads from `~/.docker/config.json`.
+
+> **Mirroring only public images?** If your Docker config has an *interactive*
+> credential helper for the source (e.g. a `cgr.dev` helper that opens a browser),
+> it can be invoked even for anonymous pulls and block. Point at an empty config
+> to force anonymous: `DOCKER_CONFIG=$(mktemp -d) cgr-sync sync …`.
 
 ## CI/CD
 
