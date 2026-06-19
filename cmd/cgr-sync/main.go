@@ -71,6 +71,7 @@ func syncCmd(args []string) {
 	dryRun := fs.Bool("dry-run", false, "plan the work and print it, but copy nothing")
 	cont := fs.Bool("continue-on-error", false, "keep going after a failure instead of exiting on the first")
 	noSigs := fs.Bool("no-signatures", false, "do not mirror cosign signatures/attestations")
+	timeout := fs.Duration("timeout", 2*time.Minute, "per-operation registry timeout (0 = none)")
 	_ = fs.Parse(args)
 
 	cfg, err := config.Load(*cfgPath)
@@ -86,6 +87,7 @@ func syncCmd(args []string) {
 		MirrorSignatures: !*noSigs,
 		ContinueOnError:  *cont,
 		Verify:           verifierFor(cfg),
+		Timeout:          *timeout,
 		Logf:             logf,
 	})
 	fmt.Printf("\nsummary: copied=%d skipped=%d signatures=%d failed=%d\n",
@@ -105,6 +107,7 @@ func serveCmd(args []string) {
 	identity := fs.String("identity", "", "expected event subject, e.g. webhook:<UIDP> (optional)")
 	insecure := fs.Bool("insecure-skip-verify", false, "DANGEROUS: skip event token validation (local testing only)")
 	noSigs := fs.Bool("no-signatures", false, "do not mirror cosign signatures/attestations")
+	timeout := fs.Duration("timeout", 2*time.Minute, "per-operation registry timeout (0 = none)")
 	_ = fs.Parse(args)
 
 	cfg, err := config.Load(*cfgPath)
@@ -130,7 +133,7 @@ func serveCmd(args []string) {
 		validator = v
 	}
 
-	opts := imgsync.Options{MirrorSignatures: !*noSigs, Verify: verifierFor(cfg), Logf: logf}
+	opts := imgsync.Options{MirrorSignatures: !*noSigs, Verify: verifierFor(cfg), Timeout: *timeout, Logf: logf}
 	h := &events.Handler{
 		Validate: validator,
 		Logf:     logf,

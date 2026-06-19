@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
@@ -19,6 +20,9 @@ import (
 	"github.com/cartyc/image-syncer/internal/config"
 	"github.com/cartyc/image-syncer/internal/verify"
 )
+
+// defaultRetries is the number of retry attempts for transient registry errors.
+const defaultRetries = 3
 
 // Verifier checks an image's signature against a policy before it is mirrored.
 type Verifier interface {
@@ -36,6 +40,8 @@ type Options struct {
 	// Verify, when set, gates copying on cosign verification for repositories
 	// whose policy is enabled. Required if any repo enables verification.
 	Verify Verifier
+	// Timeout bounds each registry HTTP operation (0 = no timeout).
+	Timeout time.Duration
 	// Logf receives human-readable progress lines (newline added by caller).
 	Logf func(format string, args ...any)
 }
@@ -64,9 +70,13 @@ func newSyncer(ctx context.Context, opts Options) *syncer {
 	}
 	kc := authn.NewMultiKeychain(google.Keychain, authn.DefaultKeychain)
 	return &syncer{
-		ctx:   ctx,
-		opts:  opts,
-		crane: []crane.Option{crane.WithContext(ctx), crane.WithAuthFromKeychain(kc)},
+		ctx:  ctx,
+		opts: opts,
+		crane: []crane.Option{
+			crane.WithContext(ctx),
+			crane.WithAuthFromKeychain(kc),
+			crane.WithTransport(newTransport(opts.Timeout, defaultRetries)),
+		},
 	}
 }
 
@@ -224,15 +234,25 @@ func (s *syncer) mirrorSignatures(src, dst, digest string, res *Result) error {
 	base := strings.Replace(digest, ":", "-", 1) // sha256:abc -> sha256-abc
 	for _, suffix := range []string{".sig", ".att", ".sbom"} {
 		tag := base + suffix
-		srcRef := src + ":" + tag
-		if _, err := crane.Digest(srcRef, s.crane...); err != nil {
+		srcRef, dstRef := src+":"+tag, dst+":"+tag
+
+		srcDigest, err := crane.Digest(srcRef, s.crane...)
+		if err != nil {
 			if isNotFound(err) {
-				continue
+				continue // no such artifact on the source
 			}
 			return fmt.Errorf("check %s: %w", srcRef, err)
 		}
+
+		// Diff the artifact by digest too, so an in-sync run does no writes.
+		if dstDigest, err := crane.Digest(dstRef, s.crane...); err == nil && dstDigest == srcDigest {
+			continue
+		} else if err != nil && !isNotFound(err) {
+			return fmt.Errorf("check %s: %w", dstRef, err)
+		}
+
 		s.opts.Logf("    ~ signature %s", tag)
-		if err := crane.Copy(srcRef, dst+":"+tag, s.crane...); err != nil {
+		if err := crane.Copy(srcRef, dstRef, s.crane...); err != nil {
 			return fmt.Errorf("copy signature %s: %w", srcRef, err)
 		}
 		res.Signatures++
