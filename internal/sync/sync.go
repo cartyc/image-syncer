@@ -1,7 +1,10 @@
 // Package sync mirrors container images (and their cosign signatures /
 // attestations) from a source registry to a destination registry. It lists the
 // source tags, diffs them against the destination by digest, and copies only
-// what is missing or changed — so re-running is cheap and idempotent.
+// what is missing or changed — so re-running is cheap and idempotent. Cosign
+// artifacts are carried both via the legacy "sha256-<hex>.{sig,att,sbom}" tag
+// scheme and via the OCI Referrers API, so attestations attached either way
+// survive the mirror.
 package sync
 
 import (
@@ -14,7 +17,9 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
+	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/google"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
 	"github.com/cartyc/image-syncer/internal/config"
@@ -55,9 +60,10 @@ type Result struct {
 }
 
 type syncer struct {
-	ctx   context.Context
-	opts  Options
-	crane []crane.Option
+	ctx    context.Context
+	opts   Options
+	crane  []crane.Option
+	remote []remote.Option // same auth/transport as crane, for the Referrers API
 }
 
 // newSyncer wires the auth keychain and crane options shared by Run/SyncImage.
@@ -69,13 +75,19 @@ func newSyncer(ctx context.Context, opts Options) *syncer {
 		opts.Logf = func(string, ...any) {}
 	}
 	kc := authn.NewMultiKeychain(google.Keychain, authn.DefaultKeychain)
+	rt := newTransport(opts.Timeout, defaultRetries)
 	return &syncer{
 		ctx:  ctx,
 		opts: opts,
 		crane: []crane.Option{
 			crane.WithContext(ctx),
 			crane.WithAuthFromKeychain(kc),
-			crane.WithTransport(newTransport(opts.Timeout, defaultRetries)),
+			crane.WithTransport(rt),
+		},
+		remote: []remote.Option{
+			remote.WithContext(ctx),
+			remote.WithAuthFromKeychain(kc),
+			remote.WithTransport(rt),
 		},
 	}
 }
@@ -180,7 +192,7 @@ func (s *syncer) syncTag(src, dst, tag string, pol config.Verify, res *Result) e
 	case err == nil && dstDigest == srcDigest:
 		s.opts.Logf("  = %s:%s in sync (%s)", dst, tag, short(srcDigest))
 		res.Skipped++
-		return s.mirrorSignatures(src, dst, srcDigest, res)
+		return s.mirrorArtifacts(src, dst, srcDigest, res)
 	}
 
 	if s.opts.DryRun {
@@ -211,7 +223,7 @@ func (s *syncer) syncTag(src, dst, tag string, pol config.Verify, res *Result) e
 		return fmt.Errorf("copy %s -> %s: %w", srcRef, dstRef, err)
 	}
 	res.Copied++
-	return s.mirrorSignatures(src, dst, srcDigest, res)
+	return s.mirrorArtifacts(src, dst, srcDigest, res)
 }
 
 // toPolicy maps the config verification block onto the verify package's policy.
@@ -224,13 +236,31 @@ func toPolicy(v config.Verify) verify.Policy {
 	}
 }
 
-// mirrorSignatures copies cosign artifacts that follow the tag scheme
-// "sha256-<hex>.{sig,att,sbom}" derived from an image's digest. Absent
-// artifacts are skipped silently. (Referrers-API artifacts are a follow-up.)
-func (s *syncer) mirrorSignatures(src, dst, digest string, res *Result) error {
+// mirrorArtifacts copies an image's cosign signatures/attestations to the
+// destination, covering both ways they can be attached:
+//
+//   - the legacy "sha256-<hex>.{sig,att,sbom}" tag scheme, and
+//   - the OCI Referrers API (subject -> referring artifact), which the tag
+//     scheme misses. apko-built Chainguard images attach their SBOM attestation
+//     as a referrer, so without this the mirror carries the image but not its
+//     attestation, and a downstream `cosign verify-attestation` fails.
+//
+// Both are best-effort and idempotent: artifacts already present (by digest) on
+// the destination are skipped, and a source that has neither is a no-op.
+func (s *syncer) mirrorArtifacts(src, dst, digest string, res *Result) error {
 	if !s.opts.MirrorSignatures || s.opts.DryRun {
 		return nil
 	}
+	if err := s.mirrorSignatureTags(src, dst, digest, res); err != nil {
+		return err
+	}
+	return s.mirrorReferrers(src, dst, digest, res)
+}
+
+// mirrorSignatureTags copies cosign artifacts that follow the tag scheme
+// "sha256-<hex>.{sig,att,sbom}" derived from an image's digest. Absent
+// artifacts are skipped silently.
+func (s *syncer) mirrorSignatureTags(src, dst, digest string, res *Result) error {
 	base := strings.Replace(digest, ":", "-", 1) // sha256:abc -> sha256-abc
 	for _, suffix := range []string{".sig", ".att", ".sbom"} {
 		tag := base + suffix
@@ -254,6 +284,47 @@ func (s *syncer) mirrorSignatures(src, dst, digest string, res *Result) error {
 		s.opts.Logf("    ~ signature %s", tag)
 		if err := crane.Copy(srcRef, dstRef, s.crane...); err != nil {
 			return fmt.Errorf("copy signature %s: %w", srcRef, err)
+		}
+		res.Signatures++
+	}
+	return nil
+}
+
+// mirrorReferrers copies every artifact that refers to the image digest via the
+// OCI Referrers API. Copying the referrer manifest by digest preserves its
+// `subject` field, so a referrers-aware destination (e.g. Artifact Registry)
+// re-indexes it against the mirrored image. Registries without referrers
+// support, or images with no referrers, are a silent no-op.
+func (s *syncer) mirrorReferrers(src, dst, digest string, res *Result) error {
+	srcRepo, err := name.NewRepository(src)
+	if err != nil {
+		return fmt.Errorf("parse repo %s: %w", src, err)
+	}
+	idx, err := remote.Referrers(srcRepo.Digest(digest), s.remote...)
+	if err != nil {
+		if isNotFound(err) {
+			return nil // registry doesn't implement the referrers API
+		}
+		return fmt.Errorf("list referrers for %s@%s: %w", src, short(digest), err)
+	}
+	im, err := idx.IndexManifest()
+	if err != nil {
+		return fmt.Errorf("referrers index for %s@%s: %w", src, short(digest), err)
+	}
+	for _, desc := range im.Manifests {
+		refDigest := desc.Digest.String()
+		srcRef, dstRef := src+"@"+refDigest, dst+"@"+refDigest
+
+		// Idempotent: skip referrers already on the destination.
+		if _, err := crane.Digest(dstRef, s.crane...); err == nil {
+			continue
+		} else if !isNotFound(err) {
+			return fmt.Errorf("check %s: %w", dstRef, err)
+		}
+
+		s.opts.Logf("    ~ referrer %s (%s)", short(refDigest), desc.ArtifactType)
+		if err := crane.Copy(srcRef, dstRef, s.crane...); err != nil {
+			return fmt.Errorf("copy referrer %s: %w", srcRef, err)
 		}
 		res.Signatures++
 	}
