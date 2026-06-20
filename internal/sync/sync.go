@@ -269,10 +269,12 @@ func (s *syncer) mirrorSignatureTags(src, dst, digest string, res *Result) error
 		srcDigest, err := crane.Digest(srcRef, s.crane...)
 		if err != nil {
 			if isNotFound(err) {
+				s.opts.Logf("    · tag-scheme %s: absent at source", suffix)
 				continue // no such artifact on the source
 			}
 			return fmt.Errorf("check %s: %w", srcRef, err)
 		}
+		s.opts.Logf("    · tag-scheme %s: present at source (%s)", suffix, short(srcDigest))
 
 		// Diff the artifact by digest too, so an in-sync run does no writes.
 		if dstDigest, err := crane.Digest(dstRef, s.crane...); err == nil && dstDigest == srcDigest {
@@ -311,6 +313,7 @@ func (s *syncer) mirrorReferrers(src, dst, digest string, res *Result) error {
 	if err != nil {
 		return fmt.Errorf("referrers index for %s@%s: %w", src, short(digest), err)
 	}
+	s.opts.Logf("    · referrers: %d for %s", len(im.Manifests), short(digest))
 	for _, desc := range im.Manifests {
 		refDigest := desc.Digest.String()
 		srcRef, dstRef := src+"@"+refDigest, dst+"@"+refDigest
