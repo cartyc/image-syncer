@@ -4,7 +4,9 @@ import (
 	"context"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -150,5 +152,29 @@ func TestMirrorArtifacts_TagSchemeAndReferrers(t *testing.T) {
 	}
 	if res2.Copied != 0 || res2.Signatures != 0 {
 		t.Errorf("rerun not idempotent: copied=%d signatures=%d, want 0/0", res2.Copied, res2.Signatures)
+	}
+}
+
+func TestHeartbeat(t *testing.T) {
+	var mu sync.Mutex
+	lines := 0
+	s := newSyncer(context.Background(), Options{
+		Logf: func(string, ...any) { mu.Lock(); lines++; mu.Unlock() },
+	})
+	count := func() int { mu.Lock(); defer mu.Unlock(); return lines }
+
+	// Stopped before the first tick: no output, and stop() returns promptly.
+	stop := s.heartbeat("x", time.Hour)
+	stop()
+	if n := count(); n != 0 {
+		t.Errorf("heartbeat logged %d lines before the first tick, want 0", n)
+	}
+
+	// With a short interval it emits at least once; stop() is still clean.
+	stop = s.heartbeat("x", 2*time.Millisecond)
+	time.Sleep(40 * time.Millisecond)
+	stop()
+	if n := count(); n == 0 {
+		t.Error("heartbeat logged 0 lines with a short interval, want >=1")
 	}
 }
