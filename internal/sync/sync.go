@@ -29,6 +29,9 @@ import (
 // defaultRetries is the number of retry attempts for transient registry errors.
 const defaultRetries = 3
 
+// heartbeatInterval is how often a long-running copy logs a liveness line.
+const heartbeatInterval = 15 * time.Second
+
 // Verifier checks an image's signature against a policy before it is mirrored.
 type Verifier interface {
 	Verify(ctx context.Context, ref string, p verify.Policy) error
@@ -219,7 +222,12 @@ func (s *syncer) syncTag(src, dst, tag string, pol config.Verify, res *Result) e
 	}
 
 	s.opts.Logf("  + copy %s:%s (%s)", dst, tag, short(srcDigest))
-	if err := crane.Copy(srcRef, dstRef, s.crane...); err != nil {
+	// A large multi-arch copy can run for minutes with no output; emit a
+	// liveness line periodically so it doesn't look hung.
+	stop := s.heartbeat(fmt.Sprintf("%s:%s", dst, tag), heartbeatInterval)
+	err = crane.Copy(srcRef, dstRef, s.crane...)
+	stop()
+	if err != nil {
 		return fmt.Errorf("copy %s -> %s: %w", srcRef, dstRef, err)
 	}
 	res.Copied++
@@ -329,6 +337,33 @@ func (s *syncer) mirrorReferrers(src, dst, digest string, res *Result) error {
 		res.Signatures++
 	}
 	return nil
+}
+
+// heartbeat logs "still copying …" every `every` until the returned stop func is
+// called, so a long copy doesn't look hung. stop blocks until the goroutine has
+// exited, so no heartbeat line interleaves with later output.
+func (s *syncer) heartbeat(what string, every time.Duration) (stop func()) {
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		t := time.NewTicker(every)
+		defer t.Stop()
+		var elapsed time.Duration
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				elapsed += every
+				s.opts.Logf("    … still copying %s (%s elapsed)", what, elapsed)
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-finished
+	}
 }
 
 // isNotFound reports whether err is a registry 404 (manifest/name unknown).
